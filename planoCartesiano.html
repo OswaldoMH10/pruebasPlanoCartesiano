@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Plano cartesiano interactivo</title>
+  <style>
+    :root{ --bg:#0f172a; --panel:#0b1220; --accent:#2dd4bf; --muted:#94a3b8; }
+    html,body{ height:100%; margin:0; font-family:Inter,system-ui,Segoe UI,Arial; background:linear-gradient(180deg,#071025, #0b1220); color:#e6eef6 }
+    .app{ display:grid; grid-template-columns:1fr 360px; gap:12px; height:100vh; padding:12px; box-sizing:border-box }
+    .canvas-wrap{ background:linear-gradient(180deg, rgba(255,255,255,0.02), transparent); border-radius:12px; padding:12px; display:flex; flex-direction:column }
+    canvas{ background: #071026; border-radius:8px; width:100%; height:100%; display:block }
+    .panel{ background:rgba(255,255,255,0.02); border-radius:12px; padding:12px; min-height:0; box-sizing:border-box }
+    .controls h3{ margin:0 0 8px 0; font-size:14px; color:var(--accent) }
+    label{ display:block; margin-top:8px; font-size:13px; color:var(--muted) }
+    input[type="text"], input[type="number"], select{ width:100%; padding:8px; margin-top:6px; border-radius:6px; border:1px solid rgba(255,255,255,0.06); background:transparent; color:inherit }
+    button{ margin-top:8px; width:100%; padding:10px; border-radius:8px; border:0; background:var(--accent); color:#002; font-weight:600; cursor:pointer }
+    .row{ display:flex; gap:8px }
+    .row > *{ flex:1 }
+    .small{ font-size:12px; color:var(--muted); margin-top:6px }
+    .help{ font-size:12px; color:var(--muted); margin-top:8px }
+    .coords-list{ margin-top:8px; font-size:13px }
+    .footer{ margin-top:auto; font-size:12px; color:var(--muted) }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="canvas-wrap">
+      <canvas id="canvas"></canvas>
+      <div class="small">Usa la rueda del ratón para hacer zoom, arrastra para desplazar. Haz click para colocar puntos (modo "Añadir por click").</div>
+    </div>
+
+    <div class="panel controls">
+      <h3>Plano cartesiano interactivo</h3>
+
+      <label>Escala (px por unidad)</label>
+      <input id="scaleInput" type="number" value="40" />
+
+      <label>Modo</label>
+      <select id="modeSelect">
+        <option value="pan">Mover (arrastrar)</option>
+        <option value="add">Añadir por click</option>
+        <option value="select">Seleccionar/Eliminar</option>
+      </select>
+
+      <div style="display:flex; gap:8px; margin-top:8px">
+        <button id="clearBtn">Limpiar</button>
+        <button id="snapBtn">Alternar Snap</button>
+      </div>
+
+      <hr style="margin:12px 0 8px 0; opacity:0.08" />
+
+      <div>
+        <label>Dibujar triángulo (formato: x,y separados por comas)</label>
+        <input id="p1" placeholder="Ej: -2,1" type="text" />
+        <input id="p2" placeholder="Ej: 3,0" type="text" />
+        <input id="p3" placeholder="Ej: 1,4" type="text" />
+        <button id="drawTriangleBtn">Dibujar triángulo</button>
+      </div>
+
+      <div style="margin-top:10px">
+        <label>Lista de puntos (x, y)</label>
+        <div id="pointsList" class="coords-list">(vacío)</div>
+      </div>
+
+      <div style="margin-top:12px">
+        <label>Opciones</label>
+        <div class="row">
+          <div>
+            <label>Color de figuras</label>
+            <input id="colorInput" type="text" value="#2dd4bf" />
+          </div>
+          <div>
+            <label>Grosor</label>
+            <input id="lineWidth" type="number" value="2" />
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">Formato de coordenadas: números con decimales permitidos. Ej: 1.5, -2</div>
+    </div>
+  </div>
+
+<script>
+// Plano cartesiano interactivo - un solo archivo
+//  - grid, ejes, numeración
+//  - pan/zoom
+//  - agregar puntos por click
+//  - dibujar triángulo desde coordenadas
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let w, h;
+function resize() { w = canvas.width = canvas.clientWidth; h = canvas.height = canvas.clientHeight; }
+window.addEventListener('resize', () => { resize(); draw(); });
+resize();
+
+// Transformaciones del mundo (coordenadas cartesianas)
+let scale = Number(document.getElementById('scaleInput').value) || 40; // px per unit
+let origin = { x: w/2, y: h/2 }; // pantalla -> (0,0)
+let offset = { x: 0, y: 0 }; // pan offset in world units (units)
+let isPanning = false; let lastPan = null;
+let snapToGrid = false;
+
+const points = []; // puntos en coordenadas cartesianas [{x,y}]
+
+function worldToScreen(pt){ // pt in cartesian units
+  return {
+    x: origin.x + (pt.x + offset.x) * scale,
+    y: origin.y - (pt.y + offset.y) * scale
+  }
+}
+function screenToWorld(sx, sy){
+  return {
+    x: (sx - origin.x) / scale - offset.x,
+    y: -((sy - origin.y) / scale) - offset.y
+  }
+}
+
+function snap(v){ return Math.round(v*10)/10; }
+
+function drawGrid(){
+  const gridStep = 1; // units between major grid lines
+  const minorStep = 0.5;
+  ctx.clearRect(0,0,w,h);
+
+  // background subtle
+  ctx.fillStyle = '#071026'; ctx.fillRect(0,0,w,h);
+
+  // minor grid
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+  drawGridLines(minorStep);
+
+  // major grid
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  drawGridLines(gridStep);
+
+  // axes
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+  // x axis
+  const x0 = worldToScreen({x:-10000,y:0}).x;
+  const x1 = worldToScreen({x:10000,y:0}).x;
+  const y0 = worldToScreen({x:0,y:0}).y;
+  ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y0); ctx.stroke();
+  // y axis
+  const yTop = worldToScreen({x:0,y:10000}).y;
+  const yBottom = worldToScreen({x:0,y:-10000}).y;
+  const xAxis = worldToScreen({x:0,y:0}).x;
+  ctx.beginPath(); ctx.moveTo(xAxis,yTop); ctx.lineTo(xAxis,yBottom); ctx.stroke();
+
+  // ticks and numbers along axes
+  drawNumbers();
+}
+
+function drawGridLines(step){
+  // compute visible range in world units
+  const leftTop = screenToWorld(0,0);
+  const rightBottom = screenToWorld(w,h);
+  const xMin = Math.floor(leftTop.x/step)-1;
+  const xMax = Math.ceil(rightBottom.x/step)+1;
+  const yMax = Math.ceil(leftTop.y/step)+1;
+  const yMin = Math.floor(rightBottom.y/step)-1;
+
+  ctx.beginPath();
+  for(let i=xMin;i<=xMax;i++){
+    const sx = worldToScreen({x:i*step,y:0}).x;
+    ctx.moveTo(sx,0); ctx.lineTo(sx,h);
+  }
+  for(let j=yMin;j<=yMax;j++){
+    const sy = worldToScreen({x:0,y:j*step}).y;
+    ctx.moveTo(0,sy); ctx.lineTo(w,sy);
+  }
+  ctx.stroke();
+}
+
+function drawNumbers(){
+  ctx.fillStyle = 'rgba(230,238,246,0.9)'; ctx.font = '12px Inter, system-ui';
+  const leftTop = screenToWorld(0,0);
+  const rightBottom = screenToWorld(w,h);
+  const xMin = Math.floor(leftTop.x)-1;
+  const xMax = Math.ceil(rightBottom.x)+1;
+  const yMax = Math.ceil(leftTop.y)+1;
+  const yMin = Math.floor(rightBottom.y)-1;
+
+  for(let i=xMin;i<=xMax;i++){
+    if(i===0) continue; // skip origin label for x
+    const p = worldToScreen({x:i,y:0});
+    ctx.fillText(i.toString(), p.x+4, p.y-4);
+  }
+  for(let j=yMin;j<=yMax;j++){
+    if(j===0) continue;
+    const p = worldToScreen({x:0,y:j});
+    ctx.fillText(j.toString(), p.x+6, p.y+4);
+  }
+  // origin
+  const o = worldToScreen({x:0,y:0}); ctx.fillText('0', o.x+4, o.y+12);
+}
+
+function drawPoints(){
+  const color = document.getElementById('colorInput').value || '#2dd4bf';
+  const lw = Number(document.getElementById('lineWidth').value) || 2;
+  // draw lines connecting points (if >=2)
+  if(points.length>=2){
+    ctx.beginPath();
+    for(let i=0;i<points.length;i++){
+      const s = worldToScreen(points[i]);
+      if(i===0) ctx.moveTo(s.x,s.y); else ctx.lineTo(s.x,s.y);
+    }
+    ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.stroke();
+  }
+  // draw points
+  for(let i=0;i<points.length;i++){
+    const s = worldToScreen(points[i]);
+    ctx.beginPath(); ctx.arc(s.x,s.y,5,0,Math.PI*2); ctx.fillStyle=color; ctx.fill();
+    ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.font='12px Inter'; ctx.fillText(`(${points[i].x}, ${points[i].y})`, s.x+8, s.y-8);
+  }
+}
+
+function draw(){
+  resize();
+  drawGrid();
+  drawPoints();
+}
+
+// animation loop (lightweight)
+let needsDraw = true;
+function tick(){ if(needsDraw){ draw(); needsDraw=false; } requestAnimationFrame(tick); }
+requestAnimationFrame(tick);
+
+// UI wiring
+const scaleInput = document.getElementById('scaleInput');
+scaleInput.addEventListener('change', ()=>{ scale = Number(scaleInput.value) || 20; needsDraw=true; });
+
+document.getElementById('snapBtn').addEventListener('click', ()=>{ snapToGrid = !snapToGrid; document.getElementById('snapBtn').textContent = snapToGrid? 'Snap: ON' : 'Alternar Snap'; });
+
+document.getElementById('clearBtn').addEventListener('click', ()=>{ points.length=0; updatePointsList(); needsDraw=true; });
+
+document.getElementById('drawTriangleBtn').addEventListener('click', ()=>{
+  const p1v = document.getElementById('p1').value.trim();
+  const p2v = document.getElementById('p2').value.trim();
+  const p3v = document.getElementById('p3').value.trim();
+  try{
+    const p1 = parsePair(p1v); const p2 = parsePair(p2v); const p3 = parsePair(p3v);
+    points.length=0; points.push(p1,p2,p3);
+    updatePointsList(); needsDraw=true;
+  }catch(e){ alert('Formato incorrecto. Usa: x,y Ej: 1.2,-3'); }
+});
+
+function parsePair(s){ if(!s) throw 'empty'; const parts = s.split(',').map(x=>x.trim()); if(parts.length!==2) throw 'bad'; const x=Number(parts[0]); const y=Number(parts[1]); if(Number.isNaN(x)||Number.isNaN(y)) throw 'badnum'; return {x: (snapToGrid? Math.round(x): x), y: (snapToGrid? Math.round(y): y)} }
+
+function updatePointsList(){ const el = document.getElementById('pointsList'); if(points.length===0) el.textContent='(vacío)'; else el.innerHTML = points.map((p,i)=>`${i+1}. (${p.x}, ${p.y})`).join('<br>'); }
+
+// Mouse interactions
+canvas.addEventListener('wheel', (e)=>{
+  e.preventDefault(); const delta = -Math.sign(e.deltaY); const oldScale = scale;
+  if(delta>0) scale *= 1.12; else scale /= 1.12; scale = Math.max(10, Math.min(200, scale));
+  document.getElementById('scaleInput').value = Math.round(scale);
+  // zoom towards mouse position (keep world point under cursor fixed)
+  const mouse = {x:e.offsetX, y:e.offsetY};
+  const worldBefore = screenToWorld(mouse.x, mouse.y);
+  // recompute origin unchanged but scale changed, adjust offset so that worldBefore remains at same screen point
+  const worldAfter = screenToWorld(mouse.x, mouse.y);
+  offset.x += (worldBefore.x - worldAfter.x);
+  offset.y += (worldBefore.y - worldAfter.y);
+  needsDraw=true;
+},{passive:false});
+
+let mouseDown = false;
+canvas.addEventListener('mousedown', (e)=>{
+  mouseDown = true; lastPan = {x:e.clientX, y:e.clientY};
+  const mode = document.getElementById('modeSelect').value;
+  if(mode==='add'){
+    const wpt = screenToWorld(e.offsetX, e.offsetY);
+    const p = snapToGrid ? {x: Math.round(wpt.x), y: Math.round(wpt.y)} : {x: Math.round(wpt.x*10)/10, y: Math.round(wpt.y*10)/10};
+    points.push(p); updatePointsList(); needsDraw=true;
+  }else if(mode==='select'){
+    // select nearest point and remove if clicked close
+    const wpt = screenToWorld(e.offsetX, e.offsetY);
+    let best = -1; let bestd = 1e9;
+    for(let i=0;i<points.length;i++){ const dx = points[i].x - wpt.x; const dy = points[i].y - wpt.y; const d = Math.hypot(dx,dy); if(d<bestd){ bestd=d; best=i; } }
+    if(best>=0 && bestd*scale < 10){ points.splice(best,1); updatePointsList(); needsDraw=true; }
+  }else{
+    isPanning = true;
+  }
+});
+window.addEventListener('mousemove', (e)=>{
+  if(!mouseDown) return;
+  if(isPanning){
+    const dx = (e.clientX - lastPan.x)/scale; const dy = (e.clientY - lastPan.y)/scale;
+    offset.x += dx; offset.y -= dy; lastPan = {x:e.clientX, y:e.clientY}; needsDraw=true;
+  }
+});
+window.addEventListener('mouseup', ()=>{ mouseDown=false; isPanning=false; lastPan=null; });
+
+// touch support (basic)
+canvas.addEventListener('touchstart', (ev)=>{
+  ev.preventDefault(); const t = ev.touches[0]; lastPan = {x:t.clientX, y:t.clientY}; mouseDown=true;
+});
+canvas.addEventListener('touchmove', (ev)=>{
+  ev.preventDefault(); if(!mouseDown) return; const t = ev.touches[0]; const dx = (t.clientX - lastPan.x)/scale; const dy = (t.clientY - lastPan.y)/scale; offset.x += dx; offset.y -= dy; lastPan = {x:t.clientX, y:t.clientY}; needsDraw=true;
+});
+canvas.addEventListener('touchend', (ev)=>{ mouseDown=false; lastPan=null; });
+
+// initial draw
+updatePointsList(); needsDraw=true;
+
+</script>
+</body>
+</html>
